@@ -1,0 +1,269 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>MTG Cheap Reprint Finder</title>
+
+<style>
+body {
+    font-family: Arial, sans-serif;
+    background:#23272A;
+    color:#F6F6F6;
+    padding:40px;
+}
+
+h1 {
+    color:#404EED;
+}
+
+a:link {
+    color:#5865F2;
+}
+
+a:visited {
+    color:#F6F6F6;
+}
+
+a:hover {
+    color:#7289DA;
+}
+
+a:active {
+    color:#FFFFFF;
+}
+
+input, button {
+    padding:10px;
+    font-size:16px;
+}
+
+button {
+    cursor:pointer;
+    background:#5865F2;
+    border:none;
+}
+
+.card {
+    margin-top:15px;
+    padding:12px;
+    background:#2C2F33;
+    border-left:4px solid #5865F2;
+}
+
+.loading {
+    margin-top:20px;
+    font-style:italic;
+}
+</style>
+
+</head>
+<body>
+
+<h1>MTG Cheap Reprint Finder</h1>
+
+<p>Enter a set code (examples: LTR, WHO, CLB, WOE) <a href="https://scryfall.com/sets"target="_blank">Check Sets Here.</a></p>
+
+<input id="setcode" placeholder="Set code">
+
+<button onclick="checkSet()">Search</button>
+<label>
+<input type="checkbox" id="includeSubsets">
+Include subsets
+</label>
+
+<div id="status"></div>
+<div id="results"></div>
+
+<script>
+
+let foundCards = [];
+
+async function getSetSymbol(svgUrl){
+
+    if(!svgUrl) return "";
+
+    try{
+        const response = await fetch(svgUrl);
+        const svgText = await response.text();
+
+        return `<span style="display:inline-block;width:18px;height:18px;vertical-align:middle;margin-right:4px;">
+        ${svgText}
+        </span>`;
+    }
+    catch{
+        return "";
+    }
+
+}
+
+async function checkSet(){
+
+    const inputSet = document.getElementById("setcode").value.toLowerCase();
+    const includeSubsets = document.getElementById("includeSubsets").checked;
+
+    const results = document.getElementById("results");
+    const status = document.getElementById("status");
+
+    results.innerHTML = "";
+    foundCards.length = 0;       // <— purge the stored cards
+    results.replaceChildren();   // clears DOM children
+    status.innerHTML = "<p class='loading'>Consulting the Scryfall archives...</p>";
+
+    let setCodes = [inputSet];
+
+    try{
+
+        if(includeSubsets){
+
+            const setsResponse = await fetch("https://api.scryfall.com/sets", );
+            const setsData = await setsResponse.json();
+
+            for(const s of setsData.data){
+
+                if(s.parent_set_code === inputSet){
+                    setCodes.push(s.code);
+                }
+            }
+        }
+
+        const query = setCodes.map(s => `set:${s}`).join(" OR ");
+        const response = await fetch(`https://api.scryfall.com/cards/search?q=(${query})+game:paper&unique=cards`);
+        const data = await response.json();
+
+        for (const card of data.data){
+
+            if(card.type_line && card.type_line.includes("Basic Land")) continue;
+            if(!card.prices || !card.prices.usd) continue;
+
+            const setPrice = parseFloat(card.prices.usd);
+
+            const printsResponse = await fetch(card.prints_search_uri);
+            const printsData = await printsResponse.json();
+
+            let cheapestOther = null;
+            let cheapestSet = "";
+            let cheapestURL = "";
+            let cheapestIcon = "";
+
+            for(const print of printsData.data){
+
+                if(setCodes.includes(print.set)) continue;
+                if(print.games && !print.games.includes("paper")) continue;
+                if(!print.prices || !print.prices.usd) continue;
+
+                const price = parseFloat(print.prices.usd);
+
+                if(cheapestOther === null || price < cheapestOther){
+
+                    cheapestOther = price;
+                    cheapestSet = print.set_name;
+                    cheapestURL = print.scryfall_uri;
+                    cheapestIcon = await getSetSymbol(print.set_icon_svg_uri);
+                }
+            }
+
+            if(cheapestOther === null) continue;
+            if(setPrice >= cheapestOther) continue;
+
+            const cardImage =
+                card.image_uris ?
+                card.image_uris.normal :
+                (card.card_faces ? card.card_faces[0].image_uris.normal : "");
+
+            const setIcon = await getSetSymbol(card.set_icon_svg_uri);
+
+            const ggSearch =
+                "https://tcg.goodgames.com.au/search?q=" +
+                encodeURIComponent(card.name);
+
+            const div = document.createElement("div");
+            div.className = "card";
+
+            div.innerHTML = `
+
+                <img src="${cardImage}" style="width:120px; float:left; margin-right:12px;">
+
+                <strong>${card.name}</strong><br>
+
+                ${setIcon}
+                <a href="${card.scryfall_uri}" target="_blank">${card.set_name}</a>
+                — $${setPrice}<br>
+
+                Next cheapest printing:
+                ${cheapestIcon}
+                <a href="${cheapestURL}" target="_blank">${cheapestSet}</a>
+                — $${cheapestOther}<br>
+
+                <a href="${ggSearch}" target="_blank">Search Good Games</a>
+
+                <div style="clear:both"></div>
+            `;
+
+                const savings = cheapestOther - setPrice;
+		const percentSavings =
+                	(Math.round(cheapestOther) - Math.round(setPrice)) / Math.max(5, Math.round(cheapestOther));
+
+                foundCards.push({
+                    name: card.name,
+                    setPrice: setPrice,
+                    cheapestOther: cheapestOther,
+                    savings: savings,
+                    percentSavings: percentSavings,
+                    edhRank: card.edhrec_rank || 999999,
+                    html: div
+                });
+        }
+
+        status.innerHTML = "<p>Search complete.</p>";
+renderCards();
+showSortButtons();
+    }
+    catch(err){
+
+        status.innerHTML = "<p>Error contacting Scryfall. If you have searched before, wait a moment before next search.</p>";
+        console.error(err);
+
+    }
+
+}
+function renderCards(){
+
+    for(const c of foundCards){
+        results.appendChild(c.html);
+    }
+
+}
+function showSortButtons(){
+
+    const status = document.getElementById("status");
+
+    status.innerHTML += `
+        <div style="margin-top:10px">
+            <button onclick="sortSavings()">$ Savings</button>
+            <button onclick="sortPercent()">% Savings</button>
+            <button onclick="sortEDH()">EDHRec order</button>
+        </div>
+    `;
+}
+function sortSavings(){
+
+    foundCards.sort((a,b)=> b.savings - a.savings);
+    renderCards();
+
+}
+function sortPercent(){
+
+    foundCards.sort((a,b)=> b.percentSavings - a.percentSavings);
+    renderCards();
+
+}
+function sortEDH(){
+
+    foundCards.sort((a,b)=> a.edhRank - b.edhRank);
+    renderCards();
+
+}
+</script>
+
+</body>
+</html>
