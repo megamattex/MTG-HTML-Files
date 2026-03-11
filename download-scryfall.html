@@ -1,0 +1,219 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>Commander CSV Exporter (Scryfall)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, Arial, sans-serif; background:#1e1e1e; color:#eee; margin:0; padding:24px; }
+  h1 { margin:0 0 8px; font-size: 20px; }
+  .row { display:flex; flex-wrap:wrap; gap:12px; margin: 10px 0; align-items: center; }
+  label { font-size: 14px; }
+  input[type="number"], input[type="text"], select { background:#2a2a2a; color:#eee; border:1px solid #444; border-radius:6px; padding:8px 10px; }
+  input[type="checkbox"] { transform: translateY(1px); }
+  button { background:#3a68ff; border:none; color:#fff; padding:9px 14px; border-radius:6px; cursor:pointer; }
+  button:disabled { opacity:0.6; cursor:not-allowed; }
+  .muted { color:#aaa; font-size: 12px; }
+  .status { margin-top: 8px; font-size: 13px; }
+  textarea { width:100%; height: 300px; background:#0f0f12; color:#ddd; border:1px solid #333; border-radius:8px; padding:12px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace; font-size: 12px; line-height:1.4; }
+  .box { background:#242429; border:1px solid #34343a; border-radius:10px; padding:16px; margin-top: 12px; }
+</style>
+</head>
+<body>
+
+<h1>Commander CSV Exporter (Scryfall)</h1>
+<div class="muted">Querying Scryfall: <code>q=legal:commander game:paper</code> (175 cards per page, manual paging)</div>
+
+<div class="box">
+  <div class="row">
+    <label>Query:
+      <input id="q" type="text" size="36" value="legal:commander game:paper" />
+    </label>
+
+    <label>Unique:
+      <select id="unique">
+        <option value="cards" selected>cards (dedupe prints)</option>
+        <option value="prints">prints (all)</option>
+        <option value="art">art</option>
+      </select>
+    </label>
+
+    <label>Sort:
+      <select id="order">
+        <option value="">(none)</option>
+        <option value="edhrec" selected>edhrec</option>
+        <option value="name">name</option>
+        <option value="released">released</option>
+        <option value="rarity">rarity</option>
+      </select>
+    </label>
+
+    <label>Dir:
+      <select id="dir">
+        <option value="asc" selected>asc</option>
+        <option value="desc">desc</option>
+        <option value="auto">auto</option>
+      </select>
+    </label>
+  </div>
+
+  <div class="row">
+    <label>Start page:
+      <input id="page" type="number" min="1" step="1" value="1" />
+    </label>
+    <label><input id="append" type="checkbox" checked /> Append to CSV</label>
+    <label><input id="includeHeader" type="checkbox" checked /> Include header (once)</label>
+  </div>
+
+  <div class="row">
+    <button id="fetchBtn">Fetch This Page</button>
+    <button id="nextBtn">Next Page →</button>
+  </div>
+
+  <div class="status" id="status">Idle.</div>
+</div>
+
+<div class="box">
+  <div class="muted">CSV columns: Name, scryfall_uri, mana_cost, cmc, type_line, colors, color_identity</div>
+  <textarea id="csv" spellcheck="false"></textarea>
+</div>
+
+<script>
+  const els = {
+    q: document.getElementById('q'),
+    unique: document.getElementById('unique'),
+    order: document.getElementById('order'),
+    dir: document.getElementById('dir'),
+    page: document.getElementById('page'),
+    append: document.getElementById('append'),
+    includeHeader: document.getElementById('includeHeader'),
+    status: document.getElementById('status'),
+    csv: document.getElementById('csv'),
+    fetchBtn: document.getElementById('fetchBtn'),
+    nextBtn: document.getElementById('nextBtn'),
+  };
+
+  let headerWritten = false;
+
+  function csvEscape(value) {
+    if (value === null || value === undefined) value = '';
+    value = String(value);
+    // Escape inner quotes by doubling them and wrap in quotes
+    return `"${value.replace(/"/g, '""')}"`;
+  }
+
+  function toCsvLine(card) {
+    // Fields:
+    // 1. name
+    // 2. scryfall_uri
+    // 3. mana_cost (fallback for MDFCs to join face costs)
+    // 4. cmc
+    // 5. type_line
+    // 6. colors (join letters without commas -> e.g., "WU")
+    // 7. color_identity (same)
+    const manaCost =
+      card.mana_cost && card.mana_cost.length
+        ? card.mana_cost
+        : (Array.isArray(card.card_faces)
+            ? card.card_faces.map(f => f.mana_cost).filter(Boolean).join(' // ')
+            : '');
+
+    const colors = Array.isArray(card.colors) ? card.colors.join('') : '';
+    const colorId = Array.isArray(card.color_identity) ? card.color_identity.join('') : '';
+
+    const row = [
+      csvEscape(card.name),
+      csvEscape(card.scryfall_uri || ''),
+      csvEscape(manaCost || ''),
+      csvEscape(card.cmc ?? ''),
+      csvEscape(card.type_line || ''),
+      csvEscape(colors),
+      csvEscape(colorId),
+    ];
+    return row.join(',');
+  }
+
+  async function fetchPage(pageNum) {
+    const q = els.q.value.trim();
+    if (!q) { alert('Query is empty'); return; }
+
+    const params = new URLSearchParams();
+    params.set('q', q); // e.g., "legal:commander game:paper"
+    const unique = els.unique.value.trim();
+    if (unique) params.set('unique', unique);
+
+    const order = els.order.value.trim();
+    if (order) params.set('order', order);
+
+    const dir = els.dir.value.trim();
+    if (dir) params.set('dir', dir);
+
+    params.set('page', String(pageNum));     // Scryfall paginates 175 per page
+    params.set('include_extras', 'false');
+    params.set('include_multilingual', 'false');
+    params.set('include_variations', 'false');
+
+    const url = 'https://api.scryfall.com/cards/search?' + params.toString();
+
+    try {
+      setBusy(true, `Fetching page ${pageNum}…`);
+      const res = await fetch(url);
+      if (!res.ok) {
+        const txt = await res.text().catch(() => '');
+        throw new Error(`HTTP ${res.status} — ${res.statusText}\n${txt}`);
+      }
+
+      const data = await res.json();
+
+      // When not appending, reset local state and optionally write header
+      if (!els.append.checked) {
+        els.csv.value = '';
+        headerWritten = false;
+      }
+      if (els.includeHeader.checked && !headerWritten) {
+        els.csv.value += 'Name,scryfall_uri,mana_cost,cmc,type_line,colors,color_identity\n';
+        headerWritten = true;
+      }
+
+      // Append CSV lines
+      const lines = data.data.map(toCsvLine).join('\n');
+      if (lines.length) {
+        if (els.csv.value && !els.csv.value.endsWith('\n')) els.csv.value += '\n';
+        els.csv.value += lines + '\n';
+      }
+
+      // Update status
+      const totalLines = (els.csv.value.match(/\n/g) || []).length - (headerWritten ? 0 : 0);
+      const hasMore = !!data.has_more;
+      const nextPageInfo = hasMore ? (new URL(data.next_page)).searchParams.get('page') : null;
+
+      setBusy(false, `Fetched ${data.data.length} cards on page ${pageNum}. has_more=${hasMore}${nextPageInfo ? `; next page: ${nextPageInfo}` : ''}`);
+    } catch (err) {
+      setBusy(false, 'Error: ' + (err && err.message ? err.message : err));
+      console.error(err);
+    }
+  }
+
+  function setBusy(busy, msg) {
+    els.fetchBtn.disabled = busy;
+    els.nextBtn.disabled = busy;
+    els.status.textContent = msg || (busy ? 'Working…' : 'Idle.');
+  }
+
+  // Wire up buttons
+  els.fetchBtn.addEventListener('click', () => {
+    const p = Math.max(1, parseInt(els.page.value || '1', 10));
+    fetchPage(p);
+  });
+
+  els.nextBtn.addEventListener('click', () => {
+    let p = Math.max(1, parseInt(els.page.value || '1', 10));
+    p += 1;
+    els.page.value = String(p);
+    fetchPage(p);
+  });
+</script>
+
+</body>
+</html>

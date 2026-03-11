@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<title>EDHREC Rank Lookup (via Scryfall)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<style>
+  :root { color-scheme: dark; }
+  body { font-family: system-ui, Arial, sans-serif; background:#1e1e1e; color:#eee; margin:0; padding:24px; }
+  h1 { margin:0 0 10px; font-size:20px; }
+  .row { display:flex; flex-wrap:wrap; gap:12px; align-items:center; margin:8px 0; }
+  textarea { width:100%; height:240px; background:#0f0f12; color:#ddd; border:1px solid #333; border-radius:8px; padding:12px;
+             font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size:12px; line-height:1.4; }
+  input[type="checkbox"]{ transform: translateY(1px); }
+  input[type="number"], select { background:#2a2a2a; color:#eee; border:1px solid #444; border-radius:6px; padding:8px 10px; }
+  button { background:#3a68ff; border:none; color:#fff; padding:9px 14px; border-radius:6px; cursor:pointer; }
+  button:disabled{ opacity:.6; cursor:not-allowed; }
+  .box{ background:#242429; border:1px solid #34343a; border-radius:10px; padding:14px; margin-top:12px; }
+  .status{ font-size:13px; margin-top:6px; min-height:1.2em; }
+  .muted{ color:#aaa; font-size:12px; }
+  .cols{ display:grid; grid-template-columns: 1fr; gap:12px; }
+  @media (min-width: 900px){ .cols{ grid-template-columns: 1fr 1fr; } }
+</style>
+</head>
+<body>
+
+<h1>EDHREC Rank Lookup (via Scryfall)</h1>
+<div class="muted">
+  Uses <code>/cards/named</code> to look up each name (exact or fuzzy). Outputs CSV: <b>Name,edhrec_rank</b>.
+</div>
+
+<div class="cols">
+  <div class="box">
+    <div class="row">
+      <label><input id="stripDigits" type="checkbox" checked /> Strip leading 1–2 digits (e.g., “2 Sol Ring” → “Sol Ring”)</label>
+    </div>
+    <div class="row">
+      <label>Match mode:
+        <select id="mode">
+          <option value="exact" selected>exact</option>
+          <option value="fuzzy">fuzzy</option>
+        </select>
+      </label>
+      <label>Delay (ms) between requests:
+        <input id="delay" type="number" min="0" step="50" value="120" />
+      </label>
+      <label><input id="includeHeader" type="checkbox" checked /> Include CSV header</label>
+    </div>
+    <textarea id="input" placeholder="Paste card names here, one per line&#10;Example:&#10;Sol Ring&#10;Rhystic Study&#10;2 Arcane Signet"></textarea>
+    <div class="row">
+      <button id="runBtn">Lookup EDHREC Ranks</button>
+      <button id="cancelBtn" disabled>Cancel</button>
+      <span class="status" id="status">Idle.</span>
+    </div>
+  </div>
+
+  <div class="box">
+    <div class="muted">Output CSV (copy/paste into a .csv): Name,edhrec_rank</div>
+    <textarea id="csv" spellcheck="false"></textarea>
+    <div class="row">
+      <button id="downloadBtn">Download CSV</button>
+      <span class="muted">Lines are fully quoted/CSV‑safe.</span>
+    </div>
+
+    <div class="box" style="margin-top:12px;">
+      <div class="muted">Per‑card log</div>
+      <textarea id="log" style="height:160px;" spellcheck="false" readonly></textarea>
+    </div>
+  </div>
+</div>
+
+<script>
+  const els = {
+    input: document.getElementById('input'),
+    csv: document.getElementById('csv'),
+    log: document.getElementById('log'),
+    status: document.getElementById('status'),
+    mode: document.getElementById('mode'),
+    delay: document.getElementById('delay'),
+    includeHeader: document.getElementById('includeHeader'),
+    stripDigits: document.getElementById('stripDigits'),
+    runBtn: document.getElementById('runBtn'),
+    cancelBtn: document.getElementById('cancelBtn'),
+    downloadBtn: document.getElementById('downloadBtn'),
+  };
+
+  let cancelled = false;
+
+  function setBusy(b) {
+    els.runBtn.disabled = b;
+    els.cancelBtn.disabled = !b;
+  }
+
+  function csvEscape(v) {
+    if (v === null || v === undefined) v = '';
+    v = String(v);
+    return '"' + v.replace(/"/g, '""') + '"';
+  }
+
+  function normalize(line) {
+    let s = line.trim();
+    if (!s) return '';
+    if (els.stripDigits.checked) {
+      // strip 1–2 leading digits + optional space, only if next char is not a digit
+      s = s.replace(/^(?=\d{1,2}\D)\d{1,2}\s?/, "");
+    }
+    return s;
+  }
+
+  function logLine(msg) {
+    if (els.log.value && !els.log.value.endsWith('\n')) els.log.value += '\n';
+    els.log.value += msg + '\n';
+  }
+
+  async function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
+
+  async function fetchEdhrec(name, mode) {
