@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>EDH Hipster Checker</title>
+
+<style>
+body{
+    font-family: Arial, sans-serif;
+    background:#1e1e1e;
+    color:#f0f0f0;
+    padding:40px;
+}
+
+textarea{
+    width:100%;
+    height:300px;
+    font-size:14px;
+}
+
+button{
+    margin-top:10px;
+    padding:10px 16px;
+    font-size:16px;
+}
+
+.result{
+    margin-top:6px;
+}
+</style>
+
+</head>
+
+<body>
+
+<h1>EDH Hipster Checker</h1>
+
+<p>Paste your decklist (one card per line)</p>
+
+<textarea id="decklist"></textarea>
+<br>
+<button onclick="checkDeck()">Evaluate Deck</button>
+
+<h2>Results</h2>
+<div id="results"></div>
+
+<script>
+function hipsterEmoji(rank){
+
+    if(!rank) return "❓";
+
+    if(rank < 50) return "💍";          // Sol Ring ahhh
+    if(rank < 500) return "🔥";          // extremely common (hot)
+    if(rank < 2000) return "🥵";        // normal (hot)
+    if(rank < 4000) return "🙂";        // hipster (cool)
+    if(rank < 8000) return "😎";      // very hipster (frozen)
+    if(rank < 12000) return "🥶";      // very hipster (frozen)
+
+    return "❄️";                      // wizard-tier obscurity
+}
+
+async function checkDeck(){
+  let processed = 0;
+  const emojiCounts = { "💍":0, "🔥":0, "🥵":0, "🙂":0, "😎":0, "🥶":0, "❄️":0, "❓":0 };
+  const text = document.getElementById("decklist").value;
+  const lines = text
+    .split("\n")
+    .map(s => s.trim().replace(/^(?=\d{1,2}\D)\d{1,2}\s?/, ""))  // your digit-stripper
+    .filter(Boolean);
+
+  const results = document.getElementById("results");
+  results.innerHTML = "";
+
+  if (lines.length > 100) {
+    results.innerHTML = "Deck exceeds 100 cards. Ritual rejected.";
+    return;
+  }
+
+  // --- helper: compute & display verdict (NO recursion, NO increments) ---
+  
+function showDeckVerdict() {
+  const weights = { "💍":0, "🔥":2, "🥵":3, "🙂":4, "😎":5, "🥶":6, "❄️":7 };
+  const order = ["💍","🔥","🥵","🙂","😎","🥶","❄️","❓"];
+
+  // --- 1) Collect counts (exclude ❓ for scoring) ---
+  const knownEmojis = Object.keys(weights);
+  let n = 0;
+  let sum = 0;
+  for (const e of knownEmojis) {
+    const c = emojiCounts[e] || 0;
+    sum += c * weights[e];
+    n += c;
+  }
+
+  // Edge case: no known emojis
+  if (n === 0) {
+    renderVerdictBox("The oracle is confused. Too many unknown cards.", [], "Weighted average: —", "Dramatic score: —");
+    return;
+  }
+
+  // --- 2) Base weighted average in [1..7] ---
+  const avg = sum / n; // e.g., many 1s and 7s ~> ~4
+
+  // --- 3) Compute "nuance" via stddev on centered scale t = (w-4)/3 in [-1,1] ---
+  // Build frequencies on t-scale
+  const tMap = { "💍": (1-4)/3, "🔥": (2-4)/3, "🥵": (3-4)/3, "🙂": 0, "😎": (5-4)/3, "🥶": (6-4)/3, "❄️": (7-4)/3 };
+  let m = 0;               // mean of t
+  for (const e of knownEmojis) m += (emojiCounts[e] || 0) * tMap[e];
+  m /= n;
+
+  let varT = 0;            // variance of t
+  for (const e of knownEmojis) {
+    const c = emojiCounts[e] || 0;
+    const diff = tMap[e] - m;
+    varT += c * diff * diff;
+  }
+  varT /= n;
+  const s = Math.sqrt(varT);  // stddev of t ∈ [0, ~1]
+
+  // --- 4) Dramatic transformation (monotonic, tunable) ---
+  // α controls sensitivity to average, β boosts polarization
+  const alpha = 1.35; // try 1.1–1.6
+  const beta  = 0.65; // try 0.4–0.9
+  const dramatic = clamp(4 + 3 * Math.tanh(alpha * m) * (1 + beta * s), 1, 7);
+  const roundedBucket = Math.round(dramatic);
+
+  // --- 5) Headline message chosen by bucket (1..7); ❓ remains for unknown-only decks ---
+  const bucketToEmoji = {0:"💍",2:"🔥",3:"🥵",4:"🙂",5:"😎",6:"🥶",7:"❄️"};
+  const headlineEmoji = bucketToEmoji[roundedBucket];
+
+  let message = "";
+  switch (headlineEmoji) {
+    case "💍":
+      message = "💍 Get back in the herd, sheep! 🐑";
+      break;
+    case "🔥":
+      message = "🔥Got a net-decker over here! 🤓";
+      break;
+    case "🥵":
+      message = "🥵 Gotta win somehow, right? 🌞";
+      break;
+    case "🙂":
+      message = "🙂 A respectable deck... but hardly rebellious. 😈";
+      break;
+    case "😎":
+      message = "😎 Ah, a hipster brewer appears. 🆒";
+      break;
+    case "🥶":
+      message = "🥶 Now that's some underground tech. 🧑‍🔬";
+      break;
+    case "❄️":
+      message = "❄️ You absolute wizard. No one has heard of these cards. 🧙‍♂️";
+      break;
+    default:
+      message = "The oracle is confused. Too many unknown cards.";
+      break;
+  }
+
+  
+  // --- 6) Sorted counts line (include ❓ so user sees errors) ---
+  const sortedCounts = Object.entries(emojiCounts)
+    .filter(([, c]) => c > 0)
+    .sort((a, b) => a[1] - b[1] || order.indexOf(a[0]) - order.indexOf(b[0]));
+  const countsLine = sortedCounts.length
+    ? "Counts (low → high): " + sortedCounts.map(([e, c]) => `${e}×${c}`).join(", ")
+    : "Counts (low → high): —";
+
+  // --- 7) Explain the numbers (transparency) ---
+  const avgLine = `Weighted average: ${avg.toFixed(2)}`;
+  const dramaticLine = `Dramatic score: ${dramatic.toFixed(2)}`;
+
+  // --- 8) Render verdict box ---
+  renderVerdictBox("Deck Verdict: "+ message, [countsLine, avgLine, dramaticLine]);
+
+  // Helpers
+  function clamp(x, lo, hi){ return Math.max(lo, Math.min(hi, x)); }
+
+  function renderVerdictBox(titleText, lines=[], extraLineA="", extraLineB=""){
+    const verdict = document.createElement("div");
+    verdict.style.marginTop = "25px";
+    verdict.style.padding = "12px";
+    verdict.style.background = "#2a2a2a";
+    verdict.style.fontSize = "18px";
+    verdict.style.fontWeight = "bold";
+
+    const title = document.createElement("div");
+    title.textContent = titleText;
+    verdict.appendChild(title);
+
+    const small = document.createElement("div");
+    small.style.marginTop = "6px";
+    small.style.fontSize = "14px";
+    small.style.fontWeight = "normal";
+    small.style.lineHeight = "1.35";
+
+    const linesAll = [...lines.filter(Boolean), extraLineA, extraLineB].filter(Boolean);
+    small.textContent = linesAll.join("  •  ");
+    verdict.appendChild(small);
+
+    document.getElementById("results").appendChild(verdict);
+  }
+}
+
+
+
+  // --- fetch each card ---
+  for (const cardName of lines) {
+    try {
+      const response = await fetch(
+                "https://api.scryfall.com/cards/named?exact=" +
+                encodeURIComponent(cardName)
+            );
+      if (!response.ok) throw new Error("not found");
+
+      const data = await response.json();
+      const rank = data.edhrec_rank;
+      const emoji = hipsterEmoji(rank);
+      emojiCounts[emoji]++;
+
+      const div = document.createElement("div");
+      div.className = "result";
+      div.textContent = `${data.name} - ${rank ?? "no EDH data"} - ${emoji}`;
+      results.appendChild(div);
+    } catch {
+      emojiCounts["❓"]++;
+
+      const div = document.createElement("div");
+      div.className = "result";
+      div.textContent = `${cardName} - error could not find`;
+      results.appendChild(div);
+    } finally {
+      // mark this line as processed and, if it's the last, print the verdict
+      processed++;
+      if (processed === lines.length) {
+        showDeckVerdict();
+      }
+    }
+  }
+}
+</script>
+
+</body>
+</html>
