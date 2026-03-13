@@ -1,0 +1,322 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>MTG Cheap Reprint Finder</title>
+<style>
+  body {
+    font-family: Arial, sans-serif;
+    background:#23272A;
+    color:#F6F6F6;
+    padding:40px;
+  }
+  h1 { color:#404EED; }
+  a:link    { color:#5865F2; }
+  a:visited { color:#F6F6F6; }
+  a:hover   { color:#7289DA; }
+  a:active  { color:#FFFFFF; }
+  input, button { padding:10px; font-size:16px; }
+  button { cursor:pointer; background:#5865F2; border:none; color:#fff; }
+  button:disabled { opacity:0.6; cursor:not-allowed; }
+  .card {
+    margin-top:15px;
+    padding:12px;
+    background:#2C2F33;
+    border-left:4px solid #5865F2;
+  }
+  .loading { margin-top:20px; font-style:italic; }
+
+  /* Progress bar */
+  #bar {
+    height:6px;
+    background:#2C2F33;
+    border-radius:3px;
+    overflow:hidden;
+    margin-top:8px;
+    box-shadow: inset 0 0 0 1px rgba(255,255,255,0.06);
+  }
+  #barFill {
+    height:100%;
+    width:0%;
+    background:#5865F2;
+    transition: width .12s ease;
+  }
+</style>
+</head>
+<body>
+<h1>MTG Cheap Reprint Finder</h1>
+<p>
+  Enter a set code (examples: LTR, WHO, CLB, WOE)
+  <a href="https://scryfall.com/sets" target="_blank">Check Sets Here.</a>
+  Save this as .html for faster speeds!
+</p>
+<input id="setcode" placeholder="Set code">
+<button id="searchBtn" onclick="checkSet()">Search</button>
+<label>
+  <input type="checkbox" id="includeSubsets">
+  Include subsets
+</label>
+
+<div id="status"></div>
+<div id="bar"><div id="barFill"></div></div>
+<div id="results"></div>
+
+<script>
+  // ---------- Globals ----------
+  let foundCards = [];
+  let checkedCount = 0;     // cards we actually "checked" (i.e., compared printings)
+  let hitCount = 0;         // cards that are positive results
+  let processedCount = 0;   // total cards processed from the search (includes skipped)
+  let expectedTotal = 0;    // Scryfall's total_cards for the query
+  let lastStatusUpdate = 0; // throttling timestamp
+
+  // Small cache to avoid re-downloading the same set symbols repeatedly
+  const iconCache = new Map();
+
+  function resetProgress() {
+    foundCards.length = 0;
+    checkedCount = 0;
+    hitCount = 0;
+    processedCount = 0;
+    expectedTotal = 0;
+    lastStatusUpdate = 0;
+    const results = document.getElementById("results");
+    results.replaceChildren(); // clear DOM children
+    const status = document.getElementById("status");
+    status.innerHTML = "<p class='loading'>Consulting the Scryfall archives...</p>";
+    updateStatus(true);
+    updateBar();
+  }
+
+  async function getSetSymbol(svgUrl){
+    if(!svgUrl) return "";
+    if (iconCache.has(svgUrl)) return iconCache.get(svgUrl);
+    try{
+      const response = await fetch(svgUrl);
+      const svgText = await response.text();
+      const html = `<span style="display:inline-block;width:18px;height:18px;vertical-align:middle;margin-right:4px;">${svgText}</span>`;
+      iconCache.set(svgUrl, html);
+      return html;
+    } catch {
+      return "";
+    }
+  }
+
+  function updateBar() {
+    const fill = document.getElementById('barFill');
+    if (!fill) return;
+    if (!expectedTotal || expectedTotal <= 0) {
+      fill.style.width = '0%';
+      return;
+    }
+    const pct = Math.min(100, Math.round((processedCount / expectedTotal) * 100));
+    fill.style.width = pct + '%';
+  }
+
+  function updateStatus(force = false) {
+    const now = performance.now();
+    if (!force && (now - lastStatusUpdate) < 100) return; // ~10 updates/sec
+    lastStatusUpdate = now;
+    const status = document.getElementById("status");
+    status.innerHTML = `<p class='loading'>Consulting the Scryfall archives... ${checkedCount} checked, ${hitCount} hits</p>`;
+    updateBar();
+  }
+
+  function renderCards(){
+    const results = document.getElementById("results");
+    // Clear and re-append in current order to avoid duplicates after sort
+    results.replaceChildren(...foundCards.map(c => c.html));
+  }
+
+  function showSortButtons(){
+    const status = document.getElementById("status");
+    status.innerHTML = `
+      <p>Search complete. ${hitCount} hits.</p>
+      <div style="margin-top:10px">
+        <button onclick="sortSavings()">$ Savings</button>
+        <button onclick="sortPercent()">% Savings</button>
+        <button onclick="sortEDH()">EDHRec order</button>
+      </div>
+    `;
+  }
+
+  function sortSavings(){
+    foundCards.sort((a,b)=> b.savings - a.savings);
+    renderCards();
+  }
+  function sortPercent(){
+    foundCards.sort((a,b)=> b.percentSavings - a.percentSavings);
+    renderCards();
+  }
+  function sortEDH(){
+    foundCards.sort((a,b)=> a.edhRank - b.edhRank);
+    renderCards();
+  }
+
+  // Helper: fetch every page of a Scryfall list endpoint, yielding items progressively
+  async function* iterateScryfallList(firstPage) {
+    let page = firstPage;
+    while (true) {
+      for (const item of page.data) {
+        yield item;
+      }
+      if (page.has_more && page.next_page) {
+        const res = await fetch(page.next_page);
+        page = await res.json();
+      } else {
+        break;
+      }
+    }
+  }
+
+  // Helper: fully enumerate a (possibly paginated) prints_search_uri and return cheapest other print
+  async function findCheapestOtherPrint(printSearchUrl, disallowedSets) {
+    let cheapestOther = null;
+    let cheapestSet = "";
+    let cheapestURL = "";
+    let cheapestIcon = "";
+
+    // Fetch first page
+    const firstResp = await fetch(printSearchUrl);
+    const firstData = await firstResp.json();
+
+    for await (const print of iterateScryfallList(firstData)) {
+      if (disallowedSets.includes(print.set)) continue;
+      if (print.games && !print.games.includes("paper")) continue;
+      if (!print.prices || !print.prices.usd) continue;
+
+      const price = parseFloat(print.prices.usd);
+      if (Number.isNaN(price)) continue;
+
+      if (cheapestOther === null || price < cheapestOther) {
+        cheapestOther = price;
+        cheapestSet = print.set_name;
+        cheapestURL = print.scryfall_uri;
+        cheapestIcon = await getSetSymbol(print.set_icon_svg_uri);
+      }
+    }
+
+    if (cheapestOther === null) return null;
+    return { price: cheapestOther, setName: cheapestSet, url: cheapestURL, iconHtml: cheapestIcon };
+  }
+
+  async function checkSet(){
+    const inputSet = document.getElementById("setcode").value.trim().toLowerCase();
+    const includeSubsets = document.getElementById("includeSubsets").checked;
+    const status = document.getElementById("status");
+    const searchBtn = document.getElementById("searchBtn");
+
+    if (!inputSet) {
+      status.innerHTML = "<p>Please enter a set code (e.g., LTR, WHO, CLB, WOE).</p>";
+      return;
+    }
+
+    // UI: start
+    searchBtn.disabled = true;
+    const originalBtnText = searchBtn.textContent;
+    searchBtn.textContent = "Searching…";
+
+    resetProgress();
+
+    let setCodes = [inputSet];
+    try{
+      // --- Include subsets if requested ---
+      if (includeSubsets) {
+        const setsResponse = await fetch("https://api.scryfall.com/sets");
+        const setsData = await setsResponse.json();
+        for (const s of setsData.data) {
+          if (s.parent_set_code === inputSet) {
+            setCodes.push(s.code);
+          }
+        }
+      }
+
+      // --- Build query over all selected sets ---
+      const query = setCodes.map(s => `set:${s}`).join(" OR ");
+      const baseUrl = `https://api.scryfall.com/cards/search?q=(${encodeURIComponent(query)})+game:paper&unique=cards`;
+
+      // --- Fetch the first page to get total_cards for the progress bar ---
+      const response = await fetch(baseUrl);
+      const data = await response.json();
+      expectedTotal = data.total_cards || (data.data ? data.data.length : 0);
+      updateBar();
+
+      // --- Iterate all pages and process cards ---
+      for await (const card of iterateScryfallList(data)) {
+        processedCount += 1;
+
+        // Filters
+        if (card.type_line && card.type_line.includes("Basic Land")) { updateStatus(); continue; }
+        if (!card.prices || !card.prices.usd) { updateStatus(); continue; }
+
+        // This card is a candidate we are "checking"
+        checkedCount += 1;
+        updateStatus(); // throttled
+
+        const setPrice = parseFloat(card.prices.usd);
+        if (Number.isNaN(setPrice)) { continue; }
+
+        // Find the cheapest other printing (may paginate)
+        const cheapest = await findCheapestOtherPrint(card.prints_search_uri, setCodes);
+        if (!cheapest) { continue; }
+
+        if (setPrice >= cheapest.price) { continue; } // only consider if the set is cheaper
+
+        // "Hit" found
+        hitCount += 1;
+        updateStatus(true); // show hits promptly
+
+        const cardImage =
+          card.image_uris ? card.image_uris.normal :
+          (card.card_faces && card.card_faces[0] && card.card_faces[0].image_uris ? card.card_faces[0].image_uris.normal : "");
+
+        const setIcon = await getSetSymbol(card.set_icon_svg_uri);
+        const ggSearch = "https://tcg.goodgames.com.au/search?q=" + encodeURIComponent(card.name);
+
+        const div = document.createElement("div");
+        div.className = "card";
+        div.innerHTML = `
+          ${cardImage ? `<img src="${cardImage}" style="width:120px; float:left; margin-right:12px;">` : ""}
+          <strong>${card.name}</strong><br>
+          ${setIcon}<a href="${card.scryfall_uri}" target="_blank">${card.set_name}</a> — $${setPrice}<br>
+          Next cheapest printing:
+          ${cheapest.iconHtml}<a href="${cheapest.url}" target="_blank">${cheapest.setName}</a> — $${cheapest.price}<br>
+          <a href="${ggSearch}" target="_blank">Search Good Games</a>
+          <div style="clear:both"></div>
+        `;
+
+        const savings = cheapest.price - setPrice;
+        const roundedOther = Math.max(5, Math.round(cheapest.price));
+        const percentSavings = (Math.round(cheapest.price) - Math.round(setPrice)) / roundedOther;
+
+        foundCards.push({
+          name: card.name,
+          setPrice: setPrice,
+          cheapestOther: cheapest.price,
+          savings: savings,
+          percentSavings: percentSavings,
+          edhRank: card.edhrec_rank || 999999,
+          html: div
+        });
+      }
+
+      // Done
+      showSortButtons();
+      renderCards();
+
+    } catch(err){
+      status.innerHTML = "<p>Error contacting Scryfall. If you have searched before, wait a moment before next search.</p>";
+      console.error(err);
+    } finally {
+      searchBtn.disabled = false;
+      searchBtn.textContent = originalBtnText;
+      // Ensure bar is full if we processed everything Scryfall said we'd have
+      if (expectedTotal && processedCount >= expectedTotal) {
+        const fill = document.getElementById('barFill');
+        if (fill) fill.style.width = '100%';
+      }
+    }
+  }
+</script>
+</body>
+</html>
